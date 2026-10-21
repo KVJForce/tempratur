@@ -1,8 +1,9 @@
 """Tempratur - internal temperature monitor for Windows.
 
-GPU temperatures come from nvidia-smi. CPU / ACPI temperatures come from
-PowerShell, because Windows only exposes the thermal zone to elevated
-processes; the app offers a one-click restart for that.
+GPU temperatures come from nvidia-smi. CPU temperature comes from the
+Windows thermal-zone performance counter, which is readable without
+admin on most laptops; the ACPI WMI class is the fallback when that
+counter is missing.
 
 Run:     python Tempratur.pyw
 Check:   python Tempratur.pyw --selftest
@@ -200,11 +201,23 @@ def rrect(c, x1, y1, x2, y2, r, **kw):
 # --------------------------------------------------------------- sensors ---
 
 PS_ONE = r"""
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'SilentlyContinue'
+$z = Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation
+if ($z) {
+  $t = $z | Sort-Object HighPrecisionTemperature -Descending | Select-Object -First 1
+  if ($t -and $t.HighPrecisionTemperature -gt 0) {
+    [math]::Round(($t.HighPrecisionTemperature / 10) - 273.15, 1)
+    exit
+  }
+  if ($t -and $t.Temperature -gt 0) {
+    [math]::Round($t.Temperature - 273.15, 1)
+    exit
+  }
+}
 try {
-  $z = Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature
-  if (-not $z) { 'none'; exit }
-  $t = $z | Sort-Object CurrentTemperature -Descending | Select-Object -First 1
+  $a = Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop
+  if (-not $a) { 'none'; exit }
+  $t = $a | Sort-Object CurrentTemperature -Descending | Select-Object -First 1
   [math]::Round(($t.CurrentTemperature / 10) - 273.15, 1)
 } catch { 'denied' }
 """
@@ -213,10 +226,23 @@ PS_STREAM = r"""
 $ErrorActionPreference = 'SilentlyContinue'
 while ($true) {
   $v = 'none'
-  $z = Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature
+  $z = Get-CimInstance -ClassName Win32_PerfFormattedData_Counters_ThermalZoneInformation
   if ($z) {
-    $t = $z | Sort-Object CurrentTemperature -Descending | Select-Object -First 1
-    $v = [math]::Round(($t.CurrentTemperature / 10) - 273.15, 1)
+    $t = $z | Sort-Object HighPrecisionTemperature -Descending | Select-Object -First 1
+    if ($t -and $t.HighPrecisionTemperature -gt 0) {
+      $v = [math]::Round(($t.HighPrecisionTemperature / 10) - 273.15, 1)
+    } elseif ($t -and $t.Temperature -gt 0) {
+      $v = [math]::Round($t.Temperature - 273.15, 1)
+    }
+  }
+  if ($v -eq 'none') {
+    try {
+      $a = Get-CimInstance -Namespace root/WMI -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction Stop
+      if ($a) {
+        $t = $a | Sort-Object CurrentTemperature -Descending | Select-Object -First 1
+        $v = [math]::Round(($t.CurrentTemperature / 10) - 273.15, 1)
+      }
+    } catch { $v = 'denied' }
   }
   [Console]::Out.WriteLine($v)
   [Console]::Out.Flush()
@@ -296,6 +322,8 @@ class Sensors:
         if v is not None:
             self.cpu_lock = "live"
             self._set("cpu", v)
+        elif "denied" in line.lower():
+            self.cpu_lock = "denied"
 
     def _gpu_line(self, line):
         v = num(line)
