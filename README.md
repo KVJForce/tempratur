@@ -5,6 +5,7 @@ A small Windows desktop app that shows the machine's internal temperatures in a 
 - GPU temperature from `nvidia-smi`
 - CPU temperature from the Windows ACPI thermal zone
 - CPU load and memory, with a two-minute history chart
+- A 45-second CPU stress test from the Test button
 - Tray icon, start with Windows, and a notification above 85°C
 
 ## Run
@@ -19,6 +20,10 @@ Python 3.10 or newer with Tkinter. `pystray` and `Pillow` provide the tray icon;
 Windows only exposes the ACPI thermal sensor to elevated processes, so the CPU card starts locked. Click it, or press "Enable CPU sensor", to restart with admin rights.
 
 Closing the window keeps the app in the notification area. Right-click the tray icon for "Start with Windows" and "Quit", or press Ctrl+Q in the window. Esc hides it.
+
+## Test the sensors
+
+Press **Test** or Ctrl+T to run a 45-second full-core CPU load and watch the readings move. It stops early at 95°C. Enable the CPU sensor first to see the temperature climb; without admin rights, the load still rises. The test loads the CPU only, so use a game or another GPU-heavy app to exercise the GPU.
 
 ## Build a single exe
 

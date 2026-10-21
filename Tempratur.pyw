@@ -23,6 +23,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import traceback
 import winreg
+import zlib
 from collections import deque
 from io import BytesIO
 
@@ -456,6 +457,50 @@ class Tray:
         self.active = False
 
 
+# ------------------------------------------------------------------ test ---
+
+TEST_SECONDS = 45
+TEST_ABORT_AT = 95.0
+
+
+class CpuStress:
+    """Short full-core load. zlib releases the GIL, so the threads really work."""
+
+    def __init__(self, seconds=TEST_SECONDS):
+        self.seconds = seconds
+        self.started = 0.0
+        self._stop = threading.Event()
+        self._threads = []
+
+    def start(self):
+        if self.active:
+            return
+        self.started = time.time()
+        stop = threading.Event()
+        self._stop = stop
+        payload = os.urandom(2 * 1024 * 1024)
+        for _ in range(min(os.cpu_count() or 4, 16)):
+            thread = threading.Thread(target=self._work, args=(payload, stop), daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    def _work(self, payload, stop):
+        while not stop.is_set():
+            zlib.compress(payload, 6)
+
+    def stop(self):
+        self._stop.set()
+        self._threads = []
+
+    @property
+    def active(self):
+        return any(t.is_alive() for t in self._threads)
+
+    @property
+    def remaining(self):
+        return max(0.0, self.started + self.seconds - time.time())
+
+
 # ------------------------------------------------------------------- ui ----
 
 class Card(tk.Canvas):
@@ -707,6 +752,7 @@ class Chart(tk.Canvas):
 
 class App:
     TEMP_SCALE = (20, 100)
+    SUBTITLE = "Internal sensors, read every two seconds."
 
     def __init__(self, root, start_hidden=False):
         self.root = root
@@ -714,6 +760,10 @@ class App:
         self.actions = queue.Queue()
         self.tray = Tray(self.actions, autostart_enabled, self.cpu_locked)
         self.alerts = AlertLatch()
+        self.test = CpuStress()
+        self.test_peak = None
+        self.test_note = ""
+        self.test_note_until = 0.0
         self.last_pull = 0.0
         self.last_cpu_t = 0.0
         self.last_gpu_t = 0.0
@@ -741,6 +791,7 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Escape>", lambda e: self.on_close())
         root.bind("<Control-q>", lambda e: self.quit())
+        root.bind("<Control-t>", lambda e: self.toggle_test())
 
         w = min(s(1060), int(root.winfo_screenwidth() * 0.94))
         h = min(s(700), int(root.winfo_screenheight() * 0.90))
@@ -757,8 +808,9 @@ class App:
         titles.grid(row=0, column=0, sticky="w")
         tk.Label(titles, text="Tempratur", bg=BG, fg=TEXT,
                  font=(SEMI, -s(24))).pack(anchor="w")
-        tk.Label(titles, text="Internal sensors, read every two seconds.", bg=BG,
-                 fg=MUTED, font=(FAM, -s(11))).pack(anchor="w", pady=(s(1), 0))
+        self.subtitle = tk.Label(titles, text=self.SUBTITLE, bg=BG,
+                                 fg=MUTED, font=(FAM, -s(11)))
+        self.subtitle.pack(anchor="w", pady=(s(1), 0))
         self.pill = StatusPill(header)
         self.pill.grid(row=0, column=1, sticky="e")
 
@@ -785,13 +837,19 @@ class App:
         self.source_label = tk.Label(footer, text="Starting sensor readers.", bg=BG,
                                      fg=DIM, font=(FAM, -s(10)))
         self.source_label.grid(row=0, column=0, sticky="w")
+        self.test_btn = tk.Button(footer, text="Test", command=self.toggle_test,
+                                  bg=CARD, fg=TEXT, activebackground=CARD_HOVER,
+                                  activeforeground=TEXT, relief="flat", bd=0,
+                                  font=(SEMI, -s(10)), cursor="hand2",
+                                  padx=s(14), pady=s(6), highlightthickness=0)
+        self.test_btn.grid(row=0, column=1, padx=(s(10), 0))
         self.enable_btn = tk.Button(footer, text="Enable CPU sensor", command=self.enable_cpu,
                                     bg=CARD, fg=WARM, activebackground=CARD_HOVER,
                                     activeforeground=WARM, relief="flat", bd=0,
                                     font=(SEMI, -s(10)), cursor="hand2",
                                     padx=s(14), pady=s(6), highlightthickness=0)
         self.updated_label = tk.Label(footer, text="", bg=BG, fg=DIM, font=(FAM, -s(10)))
-        self.updated_label.grid(row=0, column=2, sticky="e")
+        self.updated_label.grid(row=0, column=3, sticky="e")
 
         root.update_idletasks()
         self.dark_titlebar()
@@ -852,10 +910,43 @@ class App:
             self.tray.notify("Tempratur will start with Windows." if on
                              else "Tempratur will no longer start with Windows.")
 
+    def toggle_test(self):
+        if self.test.active:
+            self._finish_test("stopped")
+            return
+        self.test.start()
+        self.test_peak = None
+        self.test_note_until = 0.0
+        self.test_btn.config(text="Stop test", fg=HOT)
+        self.subtitle.config(text=f"CPU stress test · {self.test.seconds}s left", fg=WARM)
+
+    def _finish_test(self, reason="done"):
+        if not self.test.active:
+            return
+        peak = self.test_peak
+        self.test.stop()
+        self.test_note_until = time.time() + 12
+        if reason == "hot":
+            self.test_note = f"Stopped early · CPU hit {peak:.0f}°C"
+            self.tray.notify(f"The CPU hit {peak:.0f}°C, so the test stopped early.",
+                             "Test stopped")
+        elif reason == "stopped":
+            self.test_note = (f"Test stopped · CPU peaked at {peak:.0f}°C"
+                              if peak is not None else "Test stopped")
+        elif peak is not None:
+            self.test_note = f"Test finished · CPU peaked at {peak:.0f}°C"
+            self.tray.notify(f"CPU peaked at {peak:.0f}°C during the {self.test.seconds}s test.",
+                             "Test finished")
+        else:
+            self.test_note = "Test finished · CPU sensor is locked"
+        self.test_btn.config(text="Test", fg=TEXT)
+        self.subtitle.config(text=self.test_note, fg=MUTED)
+
     def quit(self):
         if self.closed:
             return
         self.closed = True
+        self.test.stop()
         self.sensors.stop()
         self.tray.stop()
         self.root.destroy()
@@ -890,6 +981,7 @@ class App:
 
     def pull(self, now):
         sen = self.sensors
+        testing = self.test.active
         if sen.cpu is not None and sen.cpu_t > self.last_cpu_t:
             self.last_cpu_t = sen.cpu_t
             sen.cpu_hist.append((sen.cpu_t, sen.cpu))
@@ -945,13 +1037,22 @@ class App:
             peak = max(temps)
             self.pill.show(f"{prefix} {state_word(peak)}", temp_color(peak))
 
+        if testing:
+            if sen.cpu is not None:
+                self.test_peak = (sen.cpu if self.test_peak is None
+                                  else max(self.test_peak, sen.cpu))
+                if sen.cpu >= TEST_ABORT_AT:
+                    self._finish_test("hot")
+            if self.test.active and self.test.remaining <= 0:
+                self._finish_test("done")
+
         readings = {}
         if sen.cpu is not None:
             readings["CPU"] = sen.cpu
         if sen.gpu is not None:
             readings["GPU"] = sen.gpu
         hit = self.alerts.update(now, readings)
-        if hit:
+        if hit and not testing:
             name, value = hit
             self.tray.notify(f"{name} reached {value:.0f}°C. Let the machine cool down.",
                              "High temperature")
@@ -980,8 +1081,19 @@ class App:
         else:
             self.updated_label.config(text="No readings yet", fg=DIM)
 
+        if self.test.active:
+            left = math.ceil(self.test.remaining)
+            self.subtitle.config(text=f"CPU stress test · {left}s left", fg=WARM)
+            self.test_btn.config(text="Stop test", fg=HOT)
+        else:
+            self.test_btn.config(text="Test", fg=TEXT)
+            if now < self.test_note_until:
+                self.subtitle.config(text=self.test_note, fg=MUTED)
+            else:
+                self.subtitle.config(text=self.SUBTITLE, fg=MUTED)
+
         if sen.cpu_lock == "denied":
-            self.enable_btn.grid(row=0, column=1, padx=(s(10), s(14)))
+            self.enable_btn.grid(row=0, column=2, padx=(s(10), s(14)))
         else:
             self.enable_btn.grid_remove()
 
