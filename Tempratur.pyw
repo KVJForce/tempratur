@@ -4,8 +4,9 @@ GPU temperatures come from nvidia-smi. CPU / ACPI temperatures come from
 PowerShell, because Windows only exposes the thermal zone to elevated
 processes; the app offers a one-click restart for that.
 
-Run:   double-click, or `python Tempratur.pyw`
-Check: `python Tempratur.pyw --selftest`
+Run:     python Tempratur.pyw
+Check:   python Tempratur.pyw --selftest
+Closing the window keeps the monitor in the notification area.
 """
 
 import atexit
@@ -21,12 +22,21 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import traceback
+import winreg
 from collections import deque
+from io import BytesIO
 
 try:
     import psutil
 except ImportError:
     psutil = None
+
+try:
+    import pystray
+    from PIL import Image
+except Exception:
+    pystray = None
+    Image = None
 
 ICON_PNG = (
     "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"
@@ -116,6 +126,69 @@ def parse_temp(line):
     return v if v is not None and 5 <= v <= 115 else None
 
 
+def app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def first_instance():
+    """False when another copy is already running."""
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        # the handle stays open for the life of the process, which holds the lock
+        k32.CreateMutexW(None, False, "Local\\TempraturMonitor")
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            ctypes.windll.user32.MessageBoxW(
+                None, "Tempratur is already running. Check the taskbar or the "
+                      "notification area.",
+                "Tempratur", 0x40)
+            return False
+        return True
+    except Exception:
+        return True
+
+
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "Tempratur"
+
+
+def launch_command():
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}" --tray'
+    exe = sys.executable
+    if not exe.lower().endswith("pythonw.exe"):
+        quiet = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.exists(quiet):
+            exe = quiet
+    return f'"{exe}" "{os.path.abspath(__file__)}" --tray'
+
+
+def autostart_enabled():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            winreg.QueryValueEx(key, RUN_NAME)
+        return True
+    except OSError:
+        return False
+
+
+def set_autostart(on):
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as key:
+            if on:
+                winreg.SetValueEx(key, RUN_NAME, 0, winreg.REG_SZ, launch_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, RUN_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError:
+        return False
+
+
 def rrect(c, x1, y1, x2, y2, r, **kw):
     r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
     pts = (x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
@@ -153,10 +226,6 @@ while ($true) {
 GPU_CMD = ["nvidia-smi", "-lms", "2000", "--query-gpu=temperature.gpu",
            "--format=csv,noheader"]
 
-PROCS = []
-RUN = True
-
-
 def ps_cmd(script):
     enc = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     return ["powershell", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc]
@@ -166,38 +235,6 @@ def _pump(proc, q):
     for line in proc.stdout:
         q.put(line)
     q.put(None)
-
-
-def stream(cmd, handle, timeout=25):
-    """Keep one sensor process alive; restart it if it stalls or exits."""
-    while RUN:
-        try:
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                 stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
-                                 errors="replace", creationflags=NO_WINDOW)
-        except OSError:
-            return
-        PROCS.append(p)
-        q = queue.Queue()
-        threading.Thread(target=_pump, args=(p, q), daemon=True).start()
-        while RUN:
-            try:
-                line = q.get(timeout=timeout)
-            except queue.Empty:
-                break
-            if line is None:
-                break
-            try:
-                handle(line)
-            except Exception:
-                pass
-        try:
-            p.kill()
-        except Exception:
-            pass
-        if p in PROCS:
-            PROCS.remove(p)
-        time.sleep(3)
 
 
 class Sensors:
@@ -213,6 +250,9 @@ class Sensors:
         self.hi = {}
         self.cpu_hist = deque()
         self.gpu_hist = deque()
+        self._procs = []
+        self._running = True
+        atexit.register(self.stop)
 
     def start(self):
         threading.Thread(target=self._init, daemon=True).start()
@@ -227,7 +267,7 @@ class Sensors:
             if name:
                 self.gpu_name = name
                 self.gpu_seen = True
-                threading.Thread(target=stream, args=(GPU_CMD, self._gpu_line),
+                threading.Thread(target=self._stream, args=(GPU_CMD, self._gpu_line),
                                  daemon=True).start()
         except Exception:
             pass
@@ -241,7 +281,7 @@ class Sensors:
             if v is not None:
                 self._set("cpu", v)
                 self.cpu_lock = "live"
-                threading.Thread(target=stream, args=(ps_cmd(PS_STREAM), self._cpu_line),
+                threading.Thread(target=self._stream, args=(ps_cmd(PS_STREAM), self._cpu_line),
                                  daemon=True).start()
             elif "denied" in last.lower():
                 self.cpu_lock = "denied"
@@ -275,6 +315,145 @@ class Sensors:
         for hist in (self.cpu_hist, self.gpu_hist):
             while hist and hist[0][0] < now - 180:
                 hist.popleft()
+
+    def _stream(self, cmd, handle, timeout=25):
+        """Keep one sensor process alive; restart it if it stalls or exits."""
+        while self._running:
+            try:
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     stdin=subprocess.DEVNULL, text=True, encoding="utf-8",
+                                     errors="replace", creationflags=NO_WINDOW)
+            except OSError:
+                return
+            self._procs.append(p)
+            if not self._running:
+                self._kill(p)
+                return
+            q = queue.Queue()
+            threading.Thread(target=_pump, args=(p, q), daemon=True).start()
+            while self._running:
+                try:
+                    line = q.get(timeout=timeout)
+                except queue.Empty:
+                    break
+                if line is None:
+                    break
+                try:
+                    handle(line)
+                except Exception:
+                    pass
+            self._kill(p)
+            if self._running:
+                time.sleep(3)
+
+    def _kill(self, proc):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        if proc in self._procs:
+            self._procs.remove(proc)
+
+    def stop(self):
+        self._running = False
+        for proc in list(self._procs):
+            self._kill(proc)
+
+
+# ------------------------------------------------------------------ tray ---
+
+ALERT_HIGH = 85.0
+ALERT_LOW = 80.0
+ALERT_COOLDOWN = 300.0
+
+
+class AlertLatch:
+    """Fires once per over-temperature event, not once per sample."""
+
+    def __init__(self, high=ALERT_HIGH, low=ALERT_LOW, cooldown=ALERT_COOLDOWN):
+        self.high = high
+        self.low = low
+        self.cooldown = cooldown
+        self.armed = True
+        self.last = -1e9
+
+    def update(self, now, readings):
+        if not readings:
+            return None
+        name, value = max(readings.items(), key=lambda kv: kv[1])
+        if value <= self.low:
+            self.armed = True
+            return None
+        if value >= self.high and self.armed and now - self.last >= self.cooldown:
+            self.armed = False
+            self.last = now
+            return name, value
+        return None
+
+
+class Tray:
+    """Thin wrapper around pystray; every menu action goes through a queue."""
+
+    def __init__(self, actions, autostart_on, cpu_locked):
+        self.actions = actions
+        self.autostart_on = autostart_on
+        self.cpu_locked = cpu_locked
+        self.icon = None
+        self.active = False
+        self._tip = ""
+
+    def start(self):
+        if pystray is None or Image is None:
+            return False
+        try:
+            image = Image.open(BytesIO(base64.b64decode(ICON_PNG))).convert("RGBA")
+            menu = pystray.Menu(
+                pystray.MenuItem("Open Tempratur", self._action("open"), default=True),
+                pystray.MenuItem("Start with Windows", self._action("autostart"),
+                                 checked=lambda item: bool(self.autostart_on())),
+                pystray.MenuItem("Enable CPU sensor", self._action("elevate"),
+                                 visible=lambda item: bool(self.cpu_locked())),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", self._action("quit")),
+            )
+            self.icon = pystray.Icon("Tempratur", image, "Tempratur", menu)
+            self.icon.run_detached()
+            self.active = True
+            return True
+        except Exception:
+            self.icon = None
+            return False
+
+    def _action(self, name):
+        def run(icon=None, item=None):
+            self.actions.put(name)
+        return run
+
+    def notify(self, message, title="Tempratur"):
+        if not self.active:
+            return
+        try:
+            self.icon.notify(message, title)
+        except Exception:
+            pass
+
+    def tooltip(self, text):
+        if not self.active or text == self._tip:
+            return
+        try:
+            self.icon.title = text
+            self._tip = text
+        except Exception:
+            pass
+
+    def stop(self):
+        if self.icon is not None:
+            try:
+                self.icon.stop()
+            except Exception:
+                pass
+        self.icon = None
+        self.active = False
 
 
 # ------------------------------------------------------------------- ui ----
@@ -345,8 +524,15 @@ class Card(tk.Canvas):
         w, h = self.winfo_width(), self.winfo_height()
         if w < 40 or h < 40:
             return
-        outline = self.color if self.hover else BORDER
-        rrect(self, 1, 1, w - 1, h - 1, s(16), fill=CARD, outline=outline)
+        hot = self.color == HOT
+        panel = mix(CARD, HOT, 0.05) if hot else CARD
+        if self.hover:
+            outline = self.color
+        elif hot:
+            outline = mix(BORDER, HOT, 0.45)
+        else:
+            outline = BORDER
+        rrect(self, 1, 1, w - 1, h - 1, s(16), fill=panel, outline=outline)
         self.create_text(s(20), s(17), text=self.label, anchor="nw", fill=MUTED,
                          font=(SEMI, -s(11)))
         if self.tag:
@@ -359,7 +545,7 @@ class Card(tk.Canvas):
             return
         bbox = (cx - r, cy - r, cx + r, cy + r)
         self.create_arc(*bbox, start=135, extent=-270, style="arc",
-                        outline=TRACK, width=s(9))
+                        outline=mix(TRACK, HOT, 0.3) if hot else TRACK, width=s(9))
         if self.disp is not None:
             frac = gauge_frac(self.disp, self.scale)
             if frac > 0.004:
@@ -368,7 +554,7 @@ class Card(tk.Canvas):
                 ex, ey = self._point(135 - 270 * frac, cx, cy, r)
                 d = s(5)
                 self.create_oval(ex - d, ey - d, ex + d, ey + d,
-                                 fill=self.color, outline=CARD, width=s(1))
+                                 fill=self.color, outline=panel, width=s(1))
 
         if self.disp is None:
             self.create_text(cx, cy, text="—", fill=DIM, font=(SEMI, -s(32)))
@@ -522,15 +708,23 @@ class Chart(tk.Canvas):
 class App:
     TEMP_SCALE = (20, 100)
 
-    def __init__(self, root):
+    def __init__(self, root, start_hidden=False):
         self.root = root
         self.sensors = Sensors()
+        self.actions = queue.Queue()
+        self.tray = Tray(self.actions, autostart_enabled, self.cpu_locked)
+        self.alerts = AlertLatch()
         self.last_pull = 0.0
         self.last_cpu_t = 0.0
         self.last_gpu_t = 0.0
         self.cards = []
+        self.hint_shown = False
+        self.closed = False
         self.build()
+        self.tray.start()
         self.sensors.start()
+        if start_hidden and self.tray.active:
+            root.withdraw()
         root.after(60, self.tick)
 
     # -- layout ------------------------------------------------------------
@@ -544,8 +738,9 @@ class App:
         except Exception:
             pass
         root.configure(bg=BG)
-        root.protocol("WM_DELETE_WINDOW", self.close)
-        root.bind("<Escape>", lambda e: self.close())
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        root.bind("<Escape>", lambda e: self.on_close())
+        root.bind("<Control-q>", lambda e: self.quit())
 
         w = min(s(1060), int(root.winfo_screenwidth() * 0.94))
         h = min(s(700), int(root.winfo_screenheight() * 0.90))
@@ -618,28 +813,69 @@ class App:
 
     # -- behaviour ---------------------------------------------------------
 
+    def cpu_locked(self):
+        return self.sensors.cpu is None and self.sensors.cpu_lock == "denied"
+
     def enable_cpu(self):
         if self.sensors.cpu is not None:
             return
+        args = None
+        if not getattr(sys, "frozen", False):
+            args = f'"{os.path.abspath(__file__)}"'
         try:
             code = ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable, f'"{os.path.abspath(__file__)}"', None, 1)
+                None, "runas", sys.executable, args, None, 1)
         except Exception:
             return
         if code > 32:
-            self.close()
+            self.quit()
 
-    def close(self):
-        global RUN
-        RUN = False
-        for p in list(PROCS):
-            try:
-                p.kill()
-            except Exception:
-                pass
+    def on_close(self):
+        if not self.tray.active:
+            self.quit()
+            return
+        self.root.withdraw()
+        if not self.hint_shown:
+            self.hint_shown = True
+            self.tray.notify(
+                "Tempratur keeps running here. Right-click the icon to quit.",
+                "Still monitoring")
+
+    def show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def toggle_autostart(self):
+        on = not autostart_enabled()
+        if set_autostart(on):
+            self.tray.notify("Tempratur will start with Windows." if on
+                             else "Tempratur will no longer start with Windows.")
+
+    def quit(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.sensors.stop()
+        self.tray.stop()
         self.root.destroy()
 
     def tick(self):
+        while True:
+            try:
+                action = self.actions.get_nowait()
+            except queue.Empty:
+                break
+            if action == "open":
+                self.show_window()
+            elif action == "autostart":
+                self.toggle_autostart()
+            elif action == "elevate":
+                self.enable_cpu()
+            elif action == "quit":
+                self.quit()
+        if self.closed:
+            return
         now = time.time()
         if now - self.last_pull >= 1.0:
             self.last_pull = now
@@ -709,6 +945,19 @@ class App:
             peak = max(temps)
             self.pill.show(f"{prefix} {state_word(peak)}", temp_color(peak))
 
+        readings = {}
+        if sen.cpu is not None:
+            readings["CPU"] = sen.cpu
+        if sen.gpu is not None:
+            readings["GPU"] = sen.gpu
+        hit = self.alerts.update(now, readings)
+        if hit:
+            name, value = hit
+            self.tray.notify(f"{name} reached {value:.0f}°C. Let the machine cool down.",
+                             "High temperature")
+        self.tray.tooltip(" · ".join(f"{k} {v:.0f}°" for k, v in readings.items())
+                          or "Tempratur")
+
         src = []
         if sen.cpu is not None:
             src.append("ACPI thermal zone")
@@ -741,8 +990,10 @@ class App:
 
 def main():
     enable_dpi()
+    if not first_instance():
+        return
     root = tk.Tk()
-    App(root)
+    App(root, start_hidden="--tray" in sys.argv)
     root.mainloop()
 
 
@@ -758,10 +1009,18 @@ def selftest():
     assert gauge_frac(20, (20, 100)) == 0 and gauge_frac(110, (20, 100)) == 1
     assert abs(gauge_frac(60, (20, 100)) - 0.5) < 1e-9
     assert mix("#000000", "#ffffff", 0.5) == "#7f7f7f"
+
+    latch = AlertLatch(85, 80, 300)
+    assert latch.update(0, {"CPU": 84}) is None
+    assert latch.update(1, {"CPU": 86}) == ("CPU", 86)
+    assert latch.update(2, {"CPU": 97}) is None
+    assert latch.update(3, {"CPU": 79}) is None
+    assert latch.update(4, {"CPU": 95}) is None
+    assert latch.update(301, {"CPU": 95}) == ("CPU", 95)
+    assert AlertLatch(85, 80, 0).update(0, {"CPU": 81, "GPU": 90}) == ("GPU", 90)
+    assert "--tray" in launch_command()
     print("selftest ok")
 
-
-atexit.register(lambda: [p.kill() for p in list(PROCS) if p.poll() is None])
 
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
@@ -771,8 +1030,7 @@ if __name__ == "__main__":
         main()
     except Exception:
         try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                   "tempratur-error.log"), "w", encoding="utf-8") as f:
+            with open(os.path.join(app_dir(), "tempratur-error.log"), "w", encoding="utf-8") as f:
                 traceback.print_exc(file=f)
         except Exception:
             pass

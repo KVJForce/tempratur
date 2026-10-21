@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 tempratur-error.log
 Tempratur.lnk
+build/
+dist/
+*.spec
+*.exe
