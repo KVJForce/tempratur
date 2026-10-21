@@ -3,7 +3,8 @@
 GPU temperatures come from nvidia-smi. CPU temperature comes from the
 Windows thermal-zone performance counter, which is readable without
 admin on most laptops; the ACPI WMI class is the fallback when that
-counter is missing.
+counter is missing. The footer buttons load all CPU cores or the NVIDIA
+GPU for 45 seconds.
 
 Run:     python Tempratur.pyw
 Check:   python Tempratur.pyw --selftest
@@ -489,6 +490,7 @@ class Tray:
 
 TEST_SECONDS = 45
 TEST_ABORT_AT = 95.0
+GPU_TEST_ABORT_AT = 90.0
 
 
 class CpuStress:
@@ -527,6 +529,223 @@ class CpuStress:
     @property
     def remaining(self):
         return max(0.0, self.started + self.seconds - time.time())
+
+
+CUDA_PTX = r"""
+.version 6.4
+.target sm_50
+.address_size 64
+
+.visible .entry burn(
+    .param .u64 out,
+    .param .u32 iters
+)
+{
+    .reg .f32 %f<19>;
+    .reg .u32 %r<8>;
+    .reg .u64 %rd<4>;
+    .reg .pred %p<2>;
+
+    ld.param.u64 %rd1, [out];
+    ld.param.u32 %r1, [iters];
+    mov.u32 %r2, %tid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mad.lo.u32 %r5, %r3, %r4, %r2;
+
+    mov.f32 %f1, 0f3F800000;
+    mov.f32 %f2, 0f3F800001;
+    mov.f32 %f3, 0f3F800002;
+    mov.f32 %f4, 0f3F800003;
+    mov.f32 %f5, 0f3F800004;
+    mov.f32 %f6, 0f3F800005;
+    mov.f32 %f7, 0f3F800006;
+    mov.f32 %f8, 0f3F800007;
+    mov.f32 %f9, 0f3F800008;
+    mov.f32 %f10, 0f3F800009;
+    mov.f32 %f11, 0f3F80000A;
+    mov.f32 %f12, 0f3F80000B;
+    mov.f32 %f13, 0f3F80000C;
+    mov.f32 %f14, 0f3F80000D;
+    mov.f32 %f15, 0f3F80000E;
+    mov.f32 %f16, 0f3F80000F;
+    mov.f32 %f17, 0f3F800001;
+    mov.f32 %f18, 0f00000001;
+
+    mov.u32 %r6, 0;
+LOOP:
+    setp.ge.u32 %p1, %r6, %r1;
+    @%p1 bra DONE;
+    fma.rn.f32 %f1, %f1, %f17, %f18;
+    fma.rn.f32 %f2, %f2, %f17, %f18;
+    fma.rn.f32 %f3, %f3, %f17, %f18;
+    fma.rn.f32 %f4, %f4, %f17, %f18;
+    fma.rn.f32 %f5, %f5, %f17, %f18;
+    fma.rn.f32 %f6, %f6, %f17, %f18;
+    fma.rn.f32 %f7, %f7, %f17, %f18;
+    fma.rn.f32 %f8, %f8, %f17, %f18;
+    fma.rn.f32 %f9, %f9, %f17, %f18;
+    fma.rn.f32 %f10, %f10, %f17, %f18;
+    fma.rn.f32 %f11, %f11, %f17, %f18;
+    fma.rn.f32 %f12, %f12, %f17, %f18;
+    fma.rn.f32 %f13, %f13, %f17, %f18;
+    fma.rn.f32 %f14, %f14, %f17, %f18;
+    fma.rn.f32 %f15, %f15, %f17, %f18;
+    fma.rn.f32 %f16, %f16, %f17, %f18;
+    add.u32 %r6, %r6, 1;
+    bra LOOP;
+DONE:
+    add.f32 %f1, %f1, %f2;
+    add.f32 %f3, %f3, %f4;
+    add.f32 %f5, %f5, %f6;
+    add.f32 %f7, %f7, %f8;
+    add.f32 %f9, %f9, %f10;
+    add.f32 %f11, %f11, %f12;
+    add.f32 %f13, %f13, %f14;
+    add.f32 %f15, %f15, %f16;
+    add.f32 %f1, %f1, %f3;
+    add.f32 %f5, %f5, %f7;
+    add.f32 %f9, %f9, %f11;
+    add.f32 %f13, %f13, %f15;
+    add.f32 %f1, %f1, %f5;
+    add.f32 %f9, %f9, %f13;
+    add.f32 %f1, %f1, %f9;
+
+    mul.wide.u32 %rd2, %r5, 4;
+    add.u64 %rd3, %rd1, %rd2;
+    st.global.f32 [%rd3], %f1;
+    ret;
+}
+"""
+
+
+class GpuStress:
+    """CUDA load for NVIDIA GPUs, driven through the installed display driver.
+
+    The kernel is hand-written PTX, so the app needs no CUDA toolkit and no
+    extra files. Short kernels keep Stop responsive.
+    """
+
+    BLOCKS = 128
+    THREADS = 256
+    ITERS = 300000
+
+    def __init__(self, seconds=TEST_SECONDS):
+        self.seconds = seconds
+        self.started = 0.0
+        self.error = None
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self.active:
+            return
+        self.started = time.time()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    @property
+    def active(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def failed(self):
+        return self.error is not None and not self.active
+
+    @property
+    def remaining(self):
+        return max(0.0, self.started + self.seconds - time.time())
+
+    @staticmethod
+    def _check(cuda, code, what):
+        if code:
+            name = ctypes.c_char_p()
+            try:
+                cuda.cuGetErrorName(code, ctypes.byref(name))
+                detail = name.value.decode(errors="replace")
+            except Exception:
+                detail = str(code)
+            raise RuntimeError(f"{what}: {detail}")
+
+    def _run(self):
+        cuda = None
+        ctx = mod = fn = None
+        buf = ctypes.c_uint64()
+        try:
+            cuda = ctypes.WinDLL("nvcuda.dll")
+            cuda.cuInit.argtypes = [ctypes.c_uint]
+            cuda.cuInit.restype = ctypes.c_int
+            cuda.cuDeviceGet.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+            cuda.cuDeviceGet.restype = ctypes.c_int
+            cuda.cuCtxCreate_v2.argtypes = [ctypes.POINTER(ctypes.c_void_p),
+                                            ctypes.c_uint, ctypes.c_int]
+            cuda.cuCtxCreate_v2.restype = ctypes.c_int
+            cuda.cuCtxDestroy_v2.argtypes = [ctypes.c_void_p]
+            cuda.cuCtxDestroy_v2.restype = ctypes.c_int
+            cuda.cuModuleLoadDataEx.argtypes = [ctypes.POINTER(ctypes.c_void_p),
+                                                ctypes.c_void_p, ctypes.c_uint,
+                                                ctypes.c_void_p, ctypes.c_void_p]
+            cuda.cuModuleLoadDataEx.restype = ctypes.c_int
+            cuda.cuModuleGetFunction.argtypes = [ctypes.POINTER(ctypes.c_void_p),
+                                                 ctypes.c_void_p, ctypes.c_char_p]
+            cuda.cuModuleGetFunction.restype = ctypes.c_int
+            cuda.cuMemAlloc_v2.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_size_t]
+            cuda.cuMemAlloc_v2.restype = ctypes.c_int
+            cuda.cuMemFree_v2.argtypes = [ctypes.c_uint64]
+            cuda.cuMemFree_v2.restype = ctypes.c_int
+            cuda.cuLaunchKernel.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
+                                            ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
+                                            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+                                            ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+            cuda.cuLaunchKernel.restype = ctypes.c_int
+            cuda.cuCtxSynchronize.argtypes = []
+            cuda.cuCtxSynchronize.restype = ctypes.c_int
+            cuda.cuGetErrorName.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)]
+            cuda.cuGetErrorName.restype = ctypes.c_int
+
+            self._check(cuda, cuda.cuInit(0), "cuInit")
+            dev = ctypes.c_int()
+            self._check(cuda, cuda.cuDeviceGet(ctypes.byref(dev), 0), "cuDeviceGet")
+            ctx = ctypes.c_void_p()
+            self._check(cuda, cuda.cuCtxCreate_v2(ctypes.byref(ctx), 0, dev), "cuCtxCreate")
+            mod = ctypes.c_void_p()
+            image = ctypes.cast(ctypes.c_char_p(CUDA_PTX.encode()), ctypes.c_void_p)
+            self._check(cuda, cuda.cuModuleLoadDataEx(
+                ctypes.byref(mod), image, 0, None, None), "cuModuleLoadDataEx")
+            fn = ctypes.c_void_p()
+            self._check(cuda, cuda.cuModuleGetFunction(
+                ctypes.byref(fn), mod, b"burn"), "cuModuleGetFunction")
+            self._check(cuda, cuda.cuMemAlloc_v2(
+                ctypes.byref(buf), self.BLOCKS * self.THREADS * 4), "cuMemAlloc")
+
+            iters = ctypes.c_uint32(self.ITERS)
+            out = ctypes.c_uint64(buf.value)
+            args = (ctypes.c_void_p * 2)(
+                ctypes.cast(ctypes.byref(out), ctypes.c_void_p),
+                ctypes.cast(ctypes.byref(iters), ctypes.c_void_p),
+            )
+            end = self.started + self.seconds
+            while not self._stop.is_set() and time.time() < end:
+                self._check(cuda, cuda.cuLaunchKernel(
+                    fn, self.BLOCKS, 1, 1, self.THREADS, 1, 1, 0, None, args, None),
+                    "cuLaunchKernel")
+                self._check(cuda, cuda.cuCtxSynchronize(), "cuCtxSynchronize")
+        except OSError:
+            self.error = "CUDA driver not found. Install or update the NVIDIA driver."
+        except Exception as exc:
+            self.error = str(exc) or "The GPU test could not start."
+        finally:
+            try:
+                if cuda is not None and buf.value:
+                    cuda.cuMemFree_v2(buf.value)
+                if cuda is not None and ctx is not None and ctx.value:
+                    cuda.cuCtxDestroy_v2(ctx)
+            except Exception:
+                pass
 
 
 # ------------------------------------------------------------------- ui ----
@@ -788,7 +1007,8 @@ class App:
         self.actions = queue.Queue()
         self.tray = Tray(self.actions, autostart_enabled, self.cpu_locked)
         self.alerts = AlertLatch()
-        self.test = CpuStress()
+        self.test = None
+        self.test_kind = None
         self.test_peak = None
         self.test_note = ""
         self.test_note_until = 0.0
@@ -819,7 +1039,8 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Escape>", lambda e: self.on_close())
         root.bind("<Control-q>", lambda e: self.quit())
-        root.bind("<Control-t>", lambda e: self.toggle_test())
+        root.bind("<Control-t>", lambda e: self.toggle_test("CPU"))
+        root.bind("<Control-g>", lambda e: self.toggle_test("GPU"))
 
         w = min(s(1060), int(root.winfo_screenwidth() * 0.94))
         h = min(s(700), int(root.winfo_screenheight() * 0.90))
@@ -865,12 +1086,23 @@ class App:
         self.source_label = tk.Label(footer, text="Starting sensor readers.", bg=BG,
                                      fg=DIM, font=(FAM, -s(10)))
         self.source_label.grid(row=0, column=0, sticky="w")
-        self.test_btn = tk.Button(footer, text="Test", command=self.toggle_test,
-                                  bg=CARD, fg=TEXT, activebackground=CARD_HOVER,
-                                  activeforeground=TEXT, relief="flat", bd=0,
-                                  font=(SEMI, -s(10)), cursor="hand2",
-                                  padx=s(14), pady=s(6), highlightthickness=0)
-        self.test_btn.grid(row=0, column=1, padx=(s(10), 0))
+        actions = tk.Frame(footer, bg=BG)
+        actions.grid(row=0, column=1, padx=(s(10), 0))
+        self.cpu_btn = tk.Button(actions, text="Test CPU",
+                                 command=lambda: self.toggle_test("CPU"),
+                                 bg=CARD, fg=TEXT, activebackground=CARD_HOVER,
+                                 activeforeground=TEXT, relief="flat", bd=0,
+                                 font=(SEMI, -s(10)), cursor="hand2",
+                                 padx=s(14), pady=s(6), highlightthickness=0)
+        self.cpu_btn.pack(side="left")
+        self.gpu_btn = tk.Button(actions, text="Test GPU",
+                                 command=lambda: self.toggle_test("GPU"),
+                                 bg=CARD, fg=TEXT, activebackground=CARD_HOVER,
+                                 activeforeground=TEXT, relief="flat", bd=0,
+                                 font=(SEMI, -s(10)), cursor="hand2",
+                                 padx=s(14), pady=s(6), highlightthickness=0,
+                                 state="disabled", disabledforeground=DIM)
+        self.gpu_btn.pack(side="left", padx=(s(8), 0))
         self.enable_btn = tk.Button(footer, text="Enable CPU sensor", command=self.enable_cpu,
                                     bg=CARD, fg=WARM, activebackground=CARD_HOVER,
                                     activeforeground=WARM, relief="flat", bd=0,
@@ -938,43 +1170,63 @@ class App:
             self.tray.notify("Tempratur will start with Windows." if on
                              else "Tempratur will no longer start with Windows.")
 
-    def toggle_test(self):
-        if self.test.active:
-            self._finish_test("stopped")
+    def toggle_test(self, kind="CPU"):
+        if self.test_kind is not None:
+            if self.test_kind == kind:
+                self._finish_test("stopped")
             return
-        self.test.start()
+        if kind == "GPU" and not self.sensors.gpu_seen:
+            return
+        self.test = CpuStress() if kind == "CPU" else GpuStress()
+        self.test_kind = kind
         self.test_peak = None
         self.test_note_until = 0.0
-        self.test_btn.config(text="Stop test", fg=HOT)
-        self.subtitle.config(text=f"CPU stress test · {self.test.seconds}s left", fg=WARM)
+        self.test.start()
+        self.cpu_btn.config(text="Stop test" if kind == "CPU" else "Test CPU",
+                            fg=HOT if kind == "CPU" else TEXT,
+                            state="normal" if kind == "CPU" else "disabled")
+        self.gpu_btn.config(text="Stop test" if kind == "GPU" else "Test GPU",
+                            fg=HOT if kind == "GPU" else TEXT,
+                            state="normal" if kind == "GPU" else "disabled")
+        self.subtitle.config(text=f"{kind} stress test · {self.test.seconds}s left", fg=WARM)
 
     def _finish_test(self, reason="done"):
-        if not self.test.active:
+        if self.test_kind is None:
             return
+        kind = self.test_kind
         peak = self.test_peak
+        seconds = self.test.seconds
+        error = getattr(self.test, "error", None)
         self.test.stop()
+        self.test_kind = None
         self.test_note_until = time.time() + 12
         if reason == "hot":
-            self.test_note = f"Stopped early · CPU hit {peak:.0f}°C"
-            self.tray.notify(f"The CPU hit {peak:.0f}°C, so the test stopped early.",
+            self.test_note = f"Stopped early · {kind} hit {peak:.0f}°C"
+            self.tray.notify(f"The {kind} hit {peak:.0f}°C, so the test stopped early.",
                              "Test stopped")
+        elif reason == "error":
+            self.test_note = f"GPU test failed · {error or 'CUDA is not available'}"
+            self.tray.notify(error or "CUDA is not available.", "GPU test failed")
         elif reason == "stopped":
-            self.test_note = (f"Test stopped · CPU peaked at {peak:.0f}°C"
+            self.test_note = (f"Test stopped · {kind} peaked at {peak:.0f}°C"
                               if peak is not None else "Test stopped")
         elif peak is not None:
-            self.test_note = f"Test finished · CPU peaked at {peak:.0f}°C"
-            self.tray.notify(f"CPU peaked at {peak:.0f}°C during the {self.test.seconds}s test.",
+            self.test_note = f"Test finished · {kind} peaked at {peak:.0f}°C"
+            self.tray.notify(f"{kind} peaked at {peak:.0f}°C during the {seconds}s test.",
                              "Test finished")
         else:
-            self.test_note = "Test finished · CPU sensor is locked"
-        self.test_btn.config(text="Test", fg=TEXT)
+            self.test_note = f"Test finished · {kind} sensor unavailable"
+        self.cpu_btn.config(text="Test CPU", fg=TEXT, state="normal")
+        self.gpu_btn.config(text="Test GPU", fg=TEXT,
+                            state="normal" if self.sensors.gpu_seen else "disabled")
         self.subtitle.config(text=self.test_note, fg=MUTED)
 
     def quit(self):
         if self.closed:
             return
         self.closed = True
-        self.test.stop()
+        if self.test is not None:
+            self.test.stop()
         self.sensors.stop()
         self.tray.stop()
         self.root.destroy()
@@ -1009,7 +1261,7 @@ class App:
 
     def pull(self, now):
         sen = self.sensors
-        testing = self.test.active
+        testing = self.test_kind is not None
         if sen.cpu is not None and sen.cpu_t > self.last_cpu_t:
             self.last_cpu_t = sen.cpu_t
             sen.cpu_hist.append((sen.cpu_t, sen.cpu))
@@ -1066,12 +1318,16 @@ class App:
             self.pill.show(f"{prefix} {state_word(peak)}", temp_color(peak))
 
         if testing:
-            if sen.cpu is not None:
-                self.test_peak = (sen.cpu if self.test_peak is None
-                                  else max(self.test_peak, sen.cpu))
-                if sen.cpu >= TEST_ABORT_AT:
+            value = sen.cpu if self.test_kind == "CPU" else sen.gpu
+            limit = TEST_ABORT_AT if self.test_kind == "CPU" else GPU_TEST_ABORT_AT
+            if value is not None:
+                self.test_peak = (value if self.test_peak is None
+                                  else max(self.test_peak, value))
+                if value >= limit:
                     self._finish_test("hot")
-            if self.test.active and self.test.remaining <= 0:
+            if self.test_kind == "GPU" and self.test.failed:
+                self._finish_test("error")
+            if self.test_kind is not None and self.test.remaining <= 0:
                 self._finish_test("done")
 
         readings = {}
@@ -1109,12 +1365,16 @@ class App:
         else:
             self.updated_label.config(text="No readings yet", fg=DIM)
 
-        if self.test.active:
+        if self.test_kind is not None:
             left = math.ceil(self.test.remaining)
-            self.subtitle.config(text=f"CPU stress test · {left}s left", fg=WARM)
-            self.test_btn.config(text="Stop test", fg=HOT)
+            self.subtitle.config(text=f"{self.test_kind} stress test · {left}s left", fg=WARM)
+            if self.test_kind == "CPU":
+                self.cpu_btn.config(text="Stop test", fg=HOT)
+            else:
+                self.gpu_btn.config(text="Stop test", fg=HOT)
         else:
-            self.test_btn.config(text="Test", fg=TEXT)
+            if sen.gpu_seen:
+                self.gpu_btn.config(state="normal")
             if now < self.test_note_until:
                 self.subtitle.config(text=self.test_note, fg=MUTED)
             else:

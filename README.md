@@ -5,7 +5,7 @@ A small Windows desktop app that shows the machine's internal temperatures in a 
 - GPU temperature from `nvidia-smi`
 - CPU temperature from the Windows thermal zone
 - CPU load and memory, with a two-minute history chart
-- A 45-second CPU stress test from the Test button
+- 45-second CPU and GPU stress tests from the footer buttons
 - Tray icon, start with Windows, and a notification above 85°C
 
 ## Run
@@ -23,7 +23,9 @@ Closing the window keeps the app in the notification area. Right-click the tray 
 
 ## Test the sensors
 
-Press **Test** or Ctrl+T to run a 45-second full-core CPU load and watch the readings move. It stops early at 95°C. If the CPU card is locked, enable the sensor first. The test loads the CPU only, so use a game or another GPU-heavy app to exercise the GPU.
+Press **Test CPU** or Ctrl+T for a 45-second full-core CPU load, and **Test GPU** or Ctrl+G to drive the NVIDIA GPU through CUDA for 45 seconds. The CPU test stops early at 95°C, the GPU test at 90°C. If the CPU card is locked, enable the sensor first.
+
+The GPU test uses the CUDA interface in the installed NVIDIA driver, so it needs no CUDA toolkit and no extra files. The button stays disabled when no NVIDIA GPU is detected. Both tests warm the other card a little through the shared heatsink.
 
 ## Build a single exe
 
